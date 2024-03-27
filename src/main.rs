@@ -13,7 +13,8 @@ struct Request {
 #[derive(Serialize)]
 struct Response {
     req_id: String,
-    msg: String,
+    command: String,
+    count: i64,
 }
 
 #[tokio::main]
@@ -37,7 +38,6 @@ async fn log_command(
     command: String,
 ) -> Result<i64, Box<dyn StdError + Send + Sync>> {
     let client = DynamoDbClient::new(Region::default());
-    let mut item = HashMap::new();
     let mut count = 1;
 
     // Check if the "command" key already exists
@@ -46,9 +46,9 @@ async fn log_command(
         key: {
             let mut map = HashMap::new();
             map.insert(
-                command.clone(),
+                "command".to_string(),
                 AttributeValue {
-                    n: Some("1".to_string()),
+                    s: Some(command.clone()),
                     ..Default::default()
                 },
             );
@@ -60,28 +60,32 @@ async fn log_command(
     let get_response = client.get_item(get_request).await?;
 
     // If the "command" key exists, increment its value. Otherwise, insert a default value of 1.
-    if let Some(mut item) = get_response.item {
-        if let Some(count_attr) = item.get(&command) {
+    let item = if let Some(mut item) = get_response.item {
+        if let Some(count_attr) = item.get_mut("count") {
             if let Some(n) = &count_attr.n {
                 count = n.parse::<i64>().unwrap_or(0) + 1;
-                item.insert(
-                    command.clone(),
-                    AttributeValue {
-                        n: Some(count.to_string()),
-                        ..Default::default()
-                    },
-                );
+                count_attr.n = Some(count.to_string());
             }
         }
+        item
     } else {
-        item.insert(
-            command.clone(),
+        let mut new_item = HashMap::new();
+        new_item.insert(
+            "command".to_string(),
+            AttributeValue {
+                s: Some(command.clone()),
+                ..Default::default()
+            },
+        );
+        new_item.insert(
+            "count".to_string(),
             AttributeValue {
                 n: Some("1".to_string()),
                 ..Default::default()
             },
         );
-    }
+        new_item
+    };
 
     let put_request = PutItemInput {
         table_name: "my-table".to_string(),
@@ -92,6 +96,7 @@ async fn log_command(
     client.put_item(put_request).await?;
     Ok(count)
 }
+
 async fn my_handler(event: LambdaEvent<Request>) -> Result<Response, Error> {
     let command = event.payload.command.clone();
     let request_id = event.context.request_id.clone();
@@ -102,11 +107,10 @@ async fn my_handler(event: LambdaEvent<Request>) -> Result<Response, Error> {
         Err(e) => return Err(lambda_runtime::Error::from(e.to_string())),
     };
 
-    let response_message = format!("Command '{}': {}", command, count);
-
     let resp = Response {
         req_id: request_id,
-        msg: response_message,
+        command,
+        count,
     };
 
     Ok(resp)
